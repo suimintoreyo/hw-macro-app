@@ -1,12 +1,22 @@
-# HW Macro App - USB デバイス常駐マクロソフトウェア
+# HW Macro App - USB / Bluetooth デバイス常駐マクロソフトウェア
 
-Windows上で接続済みUSBデバイス（キーボード・テンキー・フットペダル等）のキー入力をフックし、任意のマクロを実行する常駐アプリケーション。
+Windows上で接続済みの USB・Bluetooth デバイス（キーボード・テンキー・フットペダル・Bluetooth テンキー等）のキー入力をフックし、任意のマクロを実行する常駐アプリケーション。
 
 ---
 
 ## 概要
 
-特定のUSBデバイスを「マクロ専用デバイス」として登録し、そのデバイスのキー入力を横取りして、事前に設定したマクロ（キーストローク送信・アプリ起動・スクリプト実行など）を発火させる。通常のキーボードには一切影響しない。
+特定の USB または Bluetooth デバイスを「マクロ専用デバイス」として登録し、そのデバイスのキー入力を横取りして、事前に設定したマクロ（キーストローク送信・アプリ起動・スクリプト実行など）を発火させる。通常のキーボードには一切影響しない。
+
+### 対応デバイス
+
+| 接続方式 | 例 |
+|---------|-----|
+| USB (有線) | テンキー、フットペダル、プログラマブルキーボード |
+| USB ワイヤレス (2.4GHz ドングル) | ワイヤレステンキー、ワイヤレスミニキーボード |
+| Bluetooth / BLE | Bluetooth テンキー、Bluetooth ミニキーボード |
+
+> USB ドングル接続のワイヤレスデバイスは OS から USB HID として認識されるため、USB デバイスと同じ方式で処理される。Bluetooth デバイスは HID over GATT (BLE) または Bluetooth HID Profile 経由で接続され、Raw Input API 上では同様に HID デバイスとして扱える。
 
 ## 技術スタック
 
@@ -15,7 +25,7 @@ Windows上で接続済みUSBデバイス（キーボード・テンキー・フ�
 | 言語 | C# (.NET 8+) |
 | UI | WPF (設定画面) / NotifyIcon (タスクトレイ常駐) |
 | 入力フック | Raw Input API (`RegisterRawInputDevices`) |
-| デバイス識別 | SetupAPI / WMI (`Win32_PnPEntity`) |
+| デバイス識別 | SetupAPI / WMI (`Win32_PnPEntity`) / BluetoothLE APIs |
 | マクロ実行 | `SendInput` API / `Process.Start` |
 | 設定保存 | JSON (`System.Text.Json`) |
 | インストーラ | MSIX または Inno Setup |
@@ -56,8 +66,9 @@ HwMacroApp/
 │   ├── HwMacroApp.Core/              # コアロジック (クラスライブラリ)
 │   │   ├── Devices/
 │   │   │   ├── RawInputHook.cs       # Raw Input API ラッパー
-│   │   │   ├── DeviceEnumerator.cs   # USB デバイス列挙
-│   │   │   └── DeviceFilter.cs       # デバイス識別・フィルタリング
+│   │   │   ├── DeviceEnumerator.cs   # USB / Bluetooth デバイス列挙
+│   │   │   ├── DeviceFilter.cs       # デバイス識別・フィルタリング
+│   │   │   ├── DeviceConnectionType.cs # 接続種別 (USB/Bluetooth/BLE)
 │   │   ├── Macros/
 │   │   │   ├── IMacroAction.cs       # マクロアクション インターフェース
 │   │   │   ├── KeyStrokeAction.cs    # キーストローク送信
@@ -124,18 +135,30 @@ public record RawKeyEvent(
 // DeviceEnumerator.cs - 概要
 public class DeviceEnumerator
 {
-    // SetupAPI でHIDデバイスを列挙
+    // SetupAPI で USB HID デバイスを列挙
+    // WMI / BluetoothLE APIs で Bluetooth HID デバイスを列挙
     // VID/PID/デバイスパスで一意に識別
-    public IReadOnlyList<UsbDeviceInfo> GetConnectedKeyboards();
+    public IReadOnlyList<InputDeviceInfo> GetConnectedKeyboards();
 }
 
-public record UsbDeviceInfo(
+public enum DeviceConnectionType
+{
+    Usb,            // USB 有線
+    UsbWireless,    // USB ドングル経由 (2.4GHz)
+    Bluetooth,      // Bluetooth Classic HID
+    BluetoothLE     // Bluetooth Low Energy (HID over GATT)
+}
+
+public record InputDeviceInfo(
     string DevicePath,
     string FriendlyName,
     ushort VendorId,
-    ushort ProductId
+    ushort ProductId,
+    DeviceConnectionType ConnectionType
 );
 ```
+
+> **Bluetooth デバイスの識別**: デバイスパスに `BTHENUM` (Bluetooth Classic) や `BTHLE` (BLE) が含まれるかで接続種別を判定する。Raw Input API の `GetRawInputDeviceInfo` で取得できるデバイスパスは接続方式に関わらず HID デバイスとして統一的に扱える。
 
 ### 3. マクロアクション
 
@@ -163,6 +186,7 @@ public class KeyStrokeAction : IMacroAction
     {
       "devicePath": "\\\\?\\HID#VID_1234&PID_5678#...",
       "friendlyName": "USB テンキー",
+      "connectionType": "Usb",
       "enabled": true,
       "bindings": [
         {
@@ -181,6 +205,21 @@ public class KeyStrokeAction : IMacroAction
         }
       ]
     }
+    },
+    {
+      "devicePath": "\\\\?\\HID#BTHENUM#...",
+      "friendlyName": "Bluetooth テンキー",
+      "connectionType": "Bluetooth",
+      "enabled": true,
+      "bindings": [
+        {
+          "key": "Numpad3",
+          "actions": [
+            { "type": "keystroke", "keys": ["LControlKey", "Z"] }
+          ]
+        }
+      ]
+    }
   ],
   "general": {
     "startWithWindows": true,
@@ -195,7 +234,8 @@ public class KeyStrokeAction : IMacroAction
 - [ ] ソリューション・プロジェクト作成
 - [ ] P/Invoke 定義 (`NativeMethods`, `RawInputStructs`)
 - [ ] `RawInputHook` 実装 — メッセージ専用ウィンドウで `WM_INPUT` を受信
-- [ ] `DeviceEnumerator` 実装 — 接続中キーボードデバイスの列挙
+- [ ] `DeviceEnumerator` 実装 — 接続中の USB / Bluetooth キーボードデバイスの列挙
+- [ ] Bluetooth デバイスパス判定ロジック (`BTHENUM` / `BTHLE` パターン)
 
 ### Phase 2: コアエンジン
 - [ ] `DeviceFilter` — 登録デバイスからの入力のみ通過、元の入力は抑制
@@ -228,6 +268,15 @@ Raw Input API 単体ではキー入力を抑制できないため、以下のい
    - ドライバ署名の制約に注意
 
 推奨: まず方式1で実装し、抑制精度に問題があれば方式2を検討。
+
+## Bluetooth デバイス固有の考慮事項
+
+| 課題 | 対応 |
+|------|------|
+| 接続・切断の動的検知 | `WM_DEVICECHANGE` メッセージを監視し、デバイスの着脱をリアルタイム検知 |
+| スリープ復帰時の再接続 | デバイスパスが変わる可能性があるため、VID/PID + デバイス名で再マッチング |
+| BLE の遅延 | BLE デバイスは接続確立に数秒かかる場合がある。接続状態を UI に表示 |
+| ペアリング管理 | 本アプリではペアリング自体は OS 側で行う前提。列挙はペアリング済みデバイスのみ |
 
 ## ビルド・実行
 
