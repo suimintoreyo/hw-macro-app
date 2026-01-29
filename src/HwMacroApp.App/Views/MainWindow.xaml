@@ -1,0 +1,52 @@
+<Window x:Class="HwMacroApp.App.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="HW Macro App - 設定" Height="600" Width="800"
+        WindowStartupLocation="CenterScreen">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- 接続中デバイス一覧 -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="接続中デバイス" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+            <Button Content="更新" Margin="16,0,0,0" Padding="12,4" Click="OnRefreshClick"/>
+        </StackPanel>
+
+        <ListView Grid.Row="1" x:Name="AvailableDevicesList"
+                  ItemsSource="{Binding AvailableDevices}"
+                  SelectedItem="{Binding SelectedDevice}" Margin="0,0,0,8">
+            <ListView.View>
+                <GridView>
+                    <GridViewColumn Header="デバイス名" Width="250" DisplayMemberBinding="{Binding FriendlyName}"/>
+                    <GridViewColumn Header="接続" Width="80" DisplayMemberBinding="{Binding ConnectionType}"/>
+                    <GridViewColumn Header="VID" Width="60" DisplayMemberBinding="{Binding VendorId, StringFormat=X4}"/>
+                    <GridViewColumn Header="PID" Width="60" DisplayMemberBinding="{Binding ProductId, StringFormat=X4}"/>
+                </GridView>
+            </ListView.View>
+        </ListView>
+
+        <!-- 登録済みデバイス -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="登録済みデバイス (マクロ対象)" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+            <Button Content="登録" Margin="16,0,8,0" Padding="12,4" Click="OnRegisterClick"/>
+            <Button Content="解除" Padding="12,4" Click="OnUnregisterClick"/>
+        </StackPanel>
+
+        <ListView Grid.Row="3" x:Name="RegisteredDevicesList"
+                  ItemsSource="{Binding RegisteredDevices}" Margin="0,0,0,0">
+            <ListView.View>
+                <GridView>
+                    <GridViewColumn Header="デバイス名" Width="250" DisplayMemberBinding="{Binding FriendlyName}"/>
+                    <GridViewColumn Header="接続" Width="80" DisplayMemberBinding="{Binding ConnectionType}"/>
+                    <GridViewColumn Header="有効" Width="50" DisplayMemberBinding="{Binding Enabled}"/>
+                    <GridViewColumn Header="バインド数" Width="80" DisplayMemberBinding="{Binding Bindings.Count}"/>
+                </GridView>
+            </ListView.View>
+        </ListView>
+    </Grid>
+</Window>
