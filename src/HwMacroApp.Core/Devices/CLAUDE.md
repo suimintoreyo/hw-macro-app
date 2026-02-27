@@ -35,32 +35,43 @@ public sealed class RawInputHook : IDisposable
 ```
 
 **動作**:
-1. メッセージ専用ウィンドウを作成 (`HWND_MESSAGE`)
-2. `RegisterRawInputDevices` でキーボード HID を登録
-3. `WM_INPUT` 受信時に `RawKeyEvent` を発火
+1. `_wndProcDelegate` を保持 (GC 防止)
+2. ランダムクラス名でウィンドウクラスを登録 (`RegisterClassW`)
+3. `HWND_MESSAGE` 親でメッセージ専用ウィンドウを作成 (`CreateWindowExW`)
+4. `RegisterRawInputDevices` (RIDEV_INPUTSINK) でキーボード HID を登録
+5. `WM_INPUT` 受信時に `RawKeyEvent` を発火
 
 **注意**:
 - UI スレッド (Dispatcher) から `Start()` を呼ぶこと
-- `_wndProcDelegate` を保持して GC を防止
+- `_wndProcDelegate` を保持して GC を防止している
+
+**内部実装詳細**:
+- `ProcessRawInput`: `GetRawInputData` で RAWINPUT 構造体取得、`Marshal.AllocHGlobal` でバッファ確保 (finally で解放)
+- `GetDevicePath`: `GetRawInputDeviceInfoW(RIDI_DEVICENAME)` でデバイスパス取得
+- isKeyUp 判定: `raw.Keyboard.Flags & 0x01`
 
 ### DeviceEnumerator
 
 ```csharp
-public sealed partial class DeviceEnumerator
+public sealed partial class DeviceEnumerator  // partial は GeneratedRegex のため
 {
     public IReadOnlyList<InputDeviceInfo> GetConnectedKeyboards();
     internal static DeviceConnectionType DetermineConnectionType(string devicePath);
 }
 ```
 
-**接続種別判定ロジック**:
+**接続種別判定ロジック** (`DetermineConnectionType`):
 ```
-デバイスパスに "BTHLE" を含む → BluetoothLE
-デバイスパスに "BTHENUM" を含む → Bluetooth
-それ以外 → Usb
+devicePath.ToUpperInvariant() に "BTHLE"  を含む → BluetoothLE
+devicePath.ToUpperInvariant() に "BTHENUM" を含む → Bluetooth
+それ以外 → Usb  (USB ワイヤレスドングルも Usb に統合)
 ```
 
-**VID/PID 抽出**: 正規表現 `VID_([0-9A-Fa-f]{4})`, `PID_([0-9A-Fa-f]{4})`
+**VID/PID 抽出**: `[GeneratedRegex]` による source-generated regex
+- `VID_([0-9A-Fa-f]{4})` → VendorId
+- `PID_([0-9A-Fa-f]{4})` → ProductId
+
+**FriendlyName 生成**: `{BT|BLE|USB} Keyboard ({VID:X4}:{PID:X4})` 形式
 
 ### DeviceFilter
 
@@ -76,13 +87,17 @@ public sealed class DeviceFilter : IDisposable
 }
 ```
 
+**内部状態**:
+- `_registeredPaths`: `HashSet<string>(StringComparer.OrdinalIgnoreCase)` — 大文字小文字無視
+- `_lastRawInputDevicePath`: `volatile string?` — WM_INPUT → LL Hook 間でデバイスパスを受け渡し
+
 **入力抑制の仕組み**:
-1. `RawInputHook.KeyReceived` で `SetLastDevice()` を呼び出し
-2. LL Hook コールバックで `_lastRawInputDevicePath` を参照
+1. `RawInputHook.KeyReceived` → `App.OnKeyReceived` → `DeviceFilter.SetLastDevice(path)` で直近デバイス記録
+2. LL Hook コールバック (`HookCallback`) で `_lastRawInputDevicePath` を参照
 3. 登録済みデバイスなら `CallNextHookEx` を呼ばず `(IntPtr)1` を返す
 
 **制限**:
-- WM_INPUT と LL Hook の処理順序に依存
+- WM_INPUT と LL Hook の処理順序に依存 (WM_INPUT が先に処理されることを前提)
 - 高速なキー連打時にタイミングずれの可能性あり
 
 ### データ型
@@ -101,7 +116,7 @@ public sealed record RawKeyEvent(
     IntPtr DeviceHandle,
     string DevicePath,
     ushort VKey,
-    ushort ScanCode,
+    ushort ScanCode,   // MakeCode フィールドから取得
     bool IsKeyUp);
 ```
 
@@ -111,9 +126,9 @@ public sealed record RawKeyEvent(
 
 ### デバイスパス例
 ```
-USB:       \\?\HID#VID_1234&PID_5678#...
-Bluetooth: \\?\HID#BTHENUM#...
-BLE:       \\?\HID#BTHLE#...
+USB:         \\?\HID#VID_1234&PID_5678#...
+Bluetooth:   \\?\HID#BTHENUM#Dev_AABBCCDD#...
+BluetoothLE: \\?\HID#BTHLE#Dev_AABBCCDD#...
 ```
 
 ### 既知の動作
@@ -126,8 +141,8 @@ BLE:       \\?\HID#BTHLE#...
 ## テスト方針
 
 ### 単体テスト可能
-- `DetermineConnectionType()` — 文字列パターンマッチのみ
-- VID/PID 抽出ロジック
+- `DetermineConnectionType()` — 文字列パターンマッチのみ、Win32 API 不要
+- VID/PID 抽出ロジック — 正規表現テスト
 
 ### モック必要
 - `RawInputHook` — `IRawInputService` インターフェース抽出で対応可能
@@ -142,11 +157,12 @@ BLE:       \\?\HID#BTHLE#...
 
 ## 将来の拡張
 - [ ] `WM_DEVICECHANGE` によるデバイス着脱検知
-- [ ] USB ワイヤレス (2.4GHz ドングル) の細分化判定
+- [ ] USB ワイヤレス (2.4GHz ドングル) の `UsbWireless` への細分化判定
 - [ ] Interception ドライバ対応 (代替入力抑制方式)
 
 ---
 
 ## 既知の問題
-- LL Hook の `_lastRawInputDevicePath` は volatile だが、マルチスレッド競合の可能性あり
+- `DeviceFilter._lastRawInputDevicePath` は `volatile` だが、マルチスレッド競合の可能性あり
 - 高頻度キー入力時のタイミング問題は未検証
+- `UsbWireless` enum 値は定義済みだが、実際には `DetermineConnectionType` で使用されていない (Usb に統合)

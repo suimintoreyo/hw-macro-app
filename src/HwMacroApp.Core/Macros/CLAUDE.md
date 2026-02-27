@@ -6,7 +6,7 @@
 ## 依存関係
 ```
 Macros → Config (ActionConfig)
-Macros → Native (SendInput)
+Macros → Native (SendInput, InputStruct)
 ```
 
 ---
@@ -16,13 +16,13 @@ Macros → Native (SendInput)
 | ファイル | 役割 |
 |----------|------|
 | `IMacroAction.cs` | アクション共通インターフェース |
-| `KeyStrokeAction.cs` | SendInput でキーストローク送信 |
-| `LaunchAppAction.cs` | Process.Start でアプリ起動 |
-| `ScriptAction.cs` | PowerShell スクリプト実行 |
-| `DelayAction.cs` | Task.Delay で遅延 |
+| `KeyStrokeAction.cs` | `SendInput` でキーストローク送信 |
+| `LaunchAppAction.cs` | `Process.Start` でアプリ起動 (UseShellExecute=true) |
+| `ScriptAction.cs` | PowerShell スクリプト実行 (UseShellExecute=false, configurable shell) |
+| `DelayAction.cs` | `Task.Delay` で遅延 |
 | `MacroSequence.cs` | 複数アクションの順次実行 |
 | `MacroDispatcher.cs` | キーイベント → マクロ実行のマッピング |
-| `MacroActionFactory.cs` | ActionConfig → IMacroAction 生成 |
+| `MacroActionFactory.cs` | `ActionConfig` → `IMacroAction` 生成 |
 
 ---
 
@@ -43,10 +43,10 @@ public interface IMacroAction
 | クラス | DisplayName 例 | 動作 |
 |--------|----------------|------|
 | `KeyStrokeAction` | `0xA2+0x43` | Modifier + Key を SendInput で送信 |
-| `LaunchAppAction` | `notepad.exe` | UseShellExecute=true で起動 |
-| `ScriptAction` | `Script: test.ps1` | PowerShell -ExecutionPolicy Bypass |
-| `DelayAction` | `Delay 100ms` | Task.Delay |
-| `MacroSequence` | `A → B → C` | 順次実行 |
+| `LaunchAppAction` | `notepad.exe` | UseShellExecute=true で起動 (非同期、終了待たない) |
+| `ScriptAction` | `Script: test.ps1` | PowerShell -ExecutionPolicy Bypass (プロセス終了まで await) |
+| `DelayAction` | `Delay 100ms` | `Task.Delay(Milliseconds, ct)` |
+| `MacroSequence` | `A → B → C` | 順次実行、各ステップで CancellationToken チェック |
 
 ### MacroDispatcher
 
@@ -59,11 +59,13 @@ public sealed class MacroDispatcher
 ```
 
 **処理フロー**:
-1. `evt.IsKeyUp` なら無視 (KeyDown のみ処理)
-2. `evt.DevicePath` で登録デバイスを検索
+1. `evt.IsKeyUp == true` なら無視 (KeyDown のみ処理)
+2. `evt.DevicePath` で `config.Devices` から有効デバイスを検索 (OrdinalIgnoreCase)
 3. `evt.VKey` でキーバインドを検索
-4. `MacroActionFactory` でアクション生成
-5. `MacroSequence.ExecuteAsync()` で実行
+4. `MacroActionFactory` で各 `ActionConfig` からアクション生成
+5. `MacroSequence.ExecuteAsync()` で順次実行
+
+**注意**: `_factory` は内部で `new MacroActionFactory()` として保持。設定変更後は `MacroDispatcher` を再生成する必要あり。
 
 ### MacroActionFactory
 
@@ -74,38 +76,52 @@ public sealed class MacroActionFactory
 }
 ```
 
-**対応 type 値**:
-- `"keystroke"` → `KeyStrokeAction`
-- `"launchapp"` → `LaunchAppAction`
-- `"script"` → `ScriptAction`
-- `"delay"` → `DelayAction`
+**対応 type 値** (大文字小文字無視 — `ToLowerInvariant()` で比較):
+
+| type 値 | 生成クラス | 必須フィールド |
+|---------|-----------|----------------|
+| `"keystroke"` | `KeyStrokeAction` | `config.Keys` |
+| `"launchapp"` | `LaunchAppAction` | `config.Path` |
+| `"script"` | `ScriptAction` | `config.Path` |
+| `"delay"` | `DelayAction` | `config.Milliseconds` (デフォルト 100ms) |
+
+不明な type は `NotSupportedException` をスロー。
 
 ---
 
 ## KeyStrokeAction 詳細
 
-### 送信順序
-```
-1. Modifier KeyDown (順方向)
-2. Key KeyDown (順方向)
-3. Key KeyUp (逆方向)
-4. Modifier KeyUp (逆方向)
+### プロパティ
+```csharp
+public required ushort[] Keys { get; init; }    // メインキー
+public ushort[] Modifiers { get; init; } = [];  // 修飾キー (省略可)
 ```
 
-### 例: Ctrl+C
+### 送信順序
 ```
-KeyDown: LControlKey (0xA2)
-KeyDown: C (0x43)
-KeyUp:   C (0x43)
-KeyUp:   LControlKey (0xA2)
+1. Modifiers KeyDown (配列順)
+2. Keys KeyDown (配列順)
+3. Keys KeyUp (逆順)
+4. Modifiers KeyUp (逆順)
+```
+
+### 例: Ctrl+C (Modifier=0xA2, Key=0x43)
+```
+KeyDown: 0xA2 (LControlKey)
+KeyDown: 0x43 (C)
+KeyUp:   0x43 (C)
+KeyUp:   0xA2 (LControlKey)
 ```
 
 ### Virtual Key コード (よく使うもの)
 | キー | VK コード |
 |------|-----------|
-| Ctrl | 0xA2 (Left), 0xA3 (Right) |
-| Shift | 0xA0 (Left), 0xA1 (Right) |
-| Alt | 0xA4 (Left), 0xA5 (Right) |
+| LCtrl | 0xA2 |
+| RCtrl | 0xA3 |
+| LShift | 0xA0 |
+| RShift | 0xA1 |
+| LAlt | 0xA4 |
+| RAlt | 0xA5 |
 | A-Z | 0x41-0x5A |
 | 0-9 | 0x30-0x39 |
 | Numpad 0-9 | 0x60-0x69 |
@@ -113,19 +129,36 @@ KeyUp:   LControlKey (0xA2)
 
 ---
 
+## ScriptAction 詳細
+
+```csharp
+public required string ScriptPath { get; init; }
+public string Shell { get; init; } = "powershell.exe";       // 変更可能
+public string Arguments { get; init; } = "-ExecutionPolicy Bypass -File";  // 変更可能
+```
+
+実行コマンド: `{Shell} {Arguments} "{ScriptPath}"`
+
+- `UseShellExecute = false` (シェルを経由しない)
+- `CreateNoWindow = true` (ウィンドウ非表示)
+- プロセス終了まで `WaitForExitAsync(ct)` で待機
+
+---
+
 ## テスト方針
 
 ### 単体テスト可能
-- `MacroActionFactory.Create()` — 各 type の生成確認
+- `MacroActionFactory.Create()` — 各 type の生成確認、不正 type の例外
 - `MacroSequence` — アクション順序の確認 (モックアクション使用)
 - `MacroDispatcher` — キー→マクロマッピング (モック Config 使用)
+- `DelayAction` — DisplayName の確認
 
 ### モック対象
 ```csharp
-// 提案: ISendInputService インターフェース
+// 提案: SendInput を抽象化してテスト可能に
 public interface ISendInputService
 {
-    void SendKeystrokes(ushort[] keys, ushort[] modifiers, bool keyUp);
+    void SendKeystrokes(ushort[] allKeys);
 }
 ```
 
@@ -137,14 +170,16 @@ public interface ISendInputService
 ---
 
 ## 将来の拡張
-- [ ] `TextInputAction` — 文字列直接入力 (Unicode 対応)
+- [ ] `TextInputAction` — 文字列直接入力 (Unicode / `KEYEVENTF_UNICODE`)
 - [ ] `MouseAction` — マウスクリック/移動
 - [ ] `ConditionalAction` — 条件分岐
 - [ ] `RepeatAction` — 繰り返し実行
-- [ ] `HotkeyAction` — 他のホットキー発火
+- [ ] `HotkeyAction` — 別ホットキー発火
+- [ ] cmd.exe / bash 等への ScriptAction 対応
 
 ---
 
 ## 既知の問題
-- `ScriptAction` は PowerShell 固定。cmd.exe 等への対応は未実装
-- `KeyStrokeAction` の `KEYEVENTF_EXTENDEDKEY` フラグ未対応 (一部キーで問題の可能性)
+- `ScriptAction` の `Shell` / `Arguments` は `ActionConfig` に対応するフィールドがなく、常にデフォルト値 (PowerShell)
+- `KeyStrokeAction` の `KEYEVENTF_EXTENDEDKEY` フラグ未対応 (PrintScreen, Insert, Delete 等の拡張キーで問題の可能性)
+- `MacroDispatcher` はコンストラクタ時の `AppConfig` を参照するため、設定変更後は再生成が必要
